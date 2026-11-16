@@ -142,7 +142,7 @@ function sidebandWrap(band: 1 | 2, data: Buffer): Buffer {
 // ---------------------------------------------------------------------------------------------
 
 const V2_CAPABILITIES = ['ls-refs=unborn', 'fetch=shallow', 'object-format=sha1'];
-const V0_UPLOAD_CAPABILITIES = 'multi_ack thin-pack side-band-64k ofs-delta shallow';
+const V0_UPLOAD_CAPABILITIES = 'multi_ack multi_ack_detailed thin-pack side-band-64k ofs-delta shallow deepen-relative';
 const V0_RECEIVE_CAPABILITIES = 'report-status side-band-64k delete-refs';
 
 /** The protocol v2 capability advertisement: `version 2` plus capability lines. */
@@ -158,7 +158,7 @@ function v0Advertisement(repo: Repo, service: 'git-upload-pack' | 'git-receive-p
   const symref = `symref=HEAD:refs/heads/${repo.defaultBranch}`;
   const capabilities =
     service === 'git-upload-pack' ? `${symref} ${V0_UPLOAD_CAPABILITIES}` : `${V0_RECEIVE_CAPABILITIES} ${symref}`;
-  const items: Array<string | 'flush'> = [`# service=${service}\n`];
+  const items: Array<string | 'flush'> = [`# service=${service}\n`, 'flush'];
   const refs = [...repo.refs.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   if (refs.length === 0) {
     items.push(`${ZERO_OID} capabilities^{}\0${capabilities}\n`);
@@ -222,6 +222,7 @@ function computeFetch(
   haves: readonly string[],
   depth: number | null,
   shallowIn: readonly string[],
+  deepenRelative = false,
 ): FetchPlan {
   const lookup = (oid: string): GitObject | undefined => repo.objects.get(oid);
   const shallowInSet = new Set(shallowIn);
@@ -244,6 +245,40 @@ function computeFetch(
     } else {
       direct.add(want);
     }
+  }
+
+  // A relative deepen counts generations past the client's shallow boundary:
+  // the effective absolute depth is the deepest boundary's distance from a
+  // want, plus the requested deepen. Boundaries unreachable from the wants
+  // fall back to the absolute depth.
+  let effectiveDepth = depth;
+  if (depth !== null && deepenRelative && shallowIn.length > 0) {
+    const generations = new Map<string, number>();
+    const genQueue: string[] = [];
+    for (const seed of seedCommits) {
+      if (!generations.has(seed)) {
+        generations.set(seed, 1);
+        genQueue.push(seed);
+      }
+    }
+    while (genQueue.length > 0) {
+      const oid = genQueue.shift()!;
+      const generation = generations.get(oid)!;
+      const commit = lookup(oid);
+      if (commit === undefined || commit.type !== 'commit') continue;
+      for (const parent of parseCommit(commit.data).parents) {
+        if (!generations.has(parent)) {
+          generations.set(parent, generation + 1);
+          genQueue.push(parent);
+        }
+      }
+    }
+    let deepestBoundary = 0;
+    for (const boundary of shallowIn) {
+      const generation = generations.get(boundary);
+      if (generation !== undefined && generation > deepestBoundary) deepestBoundary = generation;
+    }
+    if (deepestBoundary > 0) effectiveDepth = deepestBoundary + depth;
   }
 
   // The included set: commits by generation, each with its full tree closure.
@@ -282,7 +317,7 @@ function computeFetch(
     const commit = lookup(oid);
     if (commit === undefined || commit.type !== 'commit') continue;
     const parents = parseCommit(commit.data).parents;
-    const limit = depth === null ? Number.POSITIVE_INFINITY : depth;
+    const limit = effectiveDepth === null ? Number.POSITIVE_INFINITY : effectiveDepth;
     if (generation < limit) {
       for (const parent of parents) {
         if (!commitGeneration.has(parent)) {
@@ -297,14 +332,14 @@ function computeFetch(
       // A tag's target commit is already handled by the generation walk; never let
       // a direct object's closure smuggle history past the depth limit.
       const object = lookup(reached);
-      if (object !== undefined && object.type === 'commit' && !commitGeneration.has(reached) && depth !== null) continue;
+      if (object !== undefined && object.type === 'commit' && !commitGeneration.has(reached) && effectiveDepth !== null) continue;
       included.add(reached);
     }
   }
 
   // Shallow boundary: included commits with a parent that was not included.
   const shallow: string[] = [];
-  if (depth !== null) {
+  if (effectiveDepth !== null) {
     for (const oid of commitGeneration.keys()) {
       const commit = lookup(oid);
       if (commit === undefined || commit.type !== 'commit') continue;
@@ -441,6 +476,8 @@ interface FetchArgs {
   haves: string[];
   shallow: string[];
   depth: number | null;
+  deepenRelative: boolean;
+  done: boolean;
 }
 
 function parseFetchArgs(lines: readonly string[]): FetchArgs {
@@ -448,11 +485,17 @@ function parseFetchArgs(lines: readonly string[]): FetchArgs {
   const haves: string[] = [];
   const shallow: string[] = [];
   let depth: number | null = null;
+  let deepenRelative = false;
+  let done = false;
   for (const raw of lines) {
     const line = raw.replace(/\n$/, '');
     if (line.startsWith('want ')) {
-      const oid = line.slice(5).split(' ')[0]!;
+      // In v0 the first want line also carries capabilities (`want <oid> cap ...`),
+      // among them `deepen-relative`; in v2 it arrives as its own argument line.
+      const parts = line.slice(5).split(' ');
+      const oid = parts[0]!;
       if (isOid(oid)) wants.push(oid);
+      if (parts.slice(1).includes('deepen-relative')) deepenRelative = true;
     } else if (line.startsWith('have ')) {
       const oid = line.slice(5).trim();
       if (isOid(oid)) haves.push(oid);
@@ -462,23 +505,36 @@ function parseFetchArgs(lines: readonly string[]): FetchArgs {
     } else if (line.startsWith('deepen ')) {
       const n = Number.parseInt(line.slice(7).trim(), 10);
       if (Number.isFinite(n) && n > 0) depth = n;
+    } else if (line === 'deepen-relative') {
+      deepenRelative = true;
+    } else if (line === 'done') {
+      done = true;
     }
   }
-  return { wants, haves, shallow, depth };
+  return { wants, haves, shallow, depth, deepenRelative, done };
 }
 
 function fetchV2Response(repo: Repo, args: FetchArgs): Buffer {
-  const plan = computeFetch(repo, args.wants, args.haves, args.depth, args.shallow);
+  const plan = computeFetch(repo, args.wants, args.haves, args.depth, args.shallow, args.deepenRelative);
   const pack = writePack(plan.objects);
   const parts: Buffer[] = [];
-  const ackItems: Array<string | 'delim'> = ['acknowledgments\n'];
-  if (plan.acks.length > 0) {
-    for (const ack of plan.acks) ackItems.push(`ACK ${ack}\n`);
-  } else {
-    ackItems.push('NAK\n');
+  // The acknowledgments section exists only when the client sent haves: real git
+  // expects the packfile (or shallow-info) section first on a haveless fetch, and
+  // the suite's parser accepts sections in any order, so omitting it is safe.
+  // The `ready` line closes the section: without it, a client that sent haves
+  // but no `done` refuses any further section (real git: "expected no other
+  // sections to be sent after no 'ready'").
+  if (args.haves.length > 0) {
+    const ackItems: Array<string | 'delim'> = ['acknowledgments\n'];
+    if (plan.acks.length > 0) {
+      for (const ack of plan.acks) ackItems.push(`ACK ${ack}\n`);
+    } else {
+      ackItems.push('NAK\n');
+    }
+    ackItems.push('ready\n');
+    ackItems.push('delim');
+    parts.push(pktLines(ackItems));
   }
-  ackItems.push('delim');
-  parts.push(pktLines(ackItems));
   if (plan.shallow.length > 0 || plan.unshallow.length > 0) {
     const shallowItems: Array<string | 'delim'> = ['shallow-info\n'];
     for (const oid of plan.shallow) shallowItems.push(`shallow ${oid}\n`);
@@ -493,17 +549,36 @@ function fetchV2Response(repo: Repo, args: FetchArgs): Buffer {
 }
 
 function fetchV0Response(repo: Repo, args: FetchArgs): Buffer {
-  const plan = computeFetch(repo, args.wants, args.haves, args.depth, args.shallow);
-  const pack = writePack(plan.objects);
+  const plan = computeFetch(repo, args.wants, args.haves, args.depth, args.shallow, args.deepenRelative);
   const parts: Buffer[] = [];
   const text: string[] = [];
   for (const oid of plan.shallow) text.push(`shallow ${oid}\n`);
   for (const oid of plan.unshallow) text.push(`unshallow ${oid}\n`);
+  // Stateless v0 negotiates in two POSTs: the first carries wants only, and the
+  // server answers with the shallow lines alone; the pack follows only once the
+  // client sends `done` (with its haves). Answering a pack early hangs the client.
+  if (!args.done) {
+    if (text.length > 0) parts.push(pktLines(text));
+    parts.push(FLUSH);
+    return Buffer.concat(parts);
+  }
+  // The shallow list is its own section: a flush terminates it before the
+  // ACK/NAK lines (real git dies with "expected shallow list" without it).
+  if (text.length > 0) {
+    parts.push(pktLines(text));
+    parts.push(FLUSH);
+    text.length = 0;
+  }
+  // With multi_ack_detailed a bare ACK ends the ack phase, so every have but
+  // the last is acknowledged with a status word and one bare ACK closes the
+  // phase — the shape real upload-pack sends (ACK <oid> common, then ACK <oid>).
   if (plan.acks.length > 0) {
-    for (const ack of plan.acks) text.push(`ACK ${ack}\n`);
+    for (const ack of plan.acks) text.push(`ACK ${ack} common\n`);
+    text.push(`ACK ${plan.acks[plan.acks.length - 1]!}\n`);
   } else {
     text.push('NAK\n');
   }
+  const pack = writePack(plan.objects);
   if (text.length > 0) parts.push(pktLines(text));
   parts.push(sidebandWrap(1, pack));
   parts.push(FLUSH);

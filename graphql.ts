@@ -189,8 +189,11 @@ export interface DocumentNode {
 
 class Parser {
   private pos = 0;
+  private readonly tokens: Token[];
 
-  constructor(private readonly tokens: Token[]) {}
+  constructor(tokens: Token[]) {
+    this.tokens = tokens;
+  }
 
   private peek(): Token {
     return this.tokens[this.pos]!;

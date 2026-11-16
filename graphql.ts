@@ -807,12 +807,12 @@ const RESOLVERS: Record<string, Record<string, Resolver>> = {
     pageInfo: (value) =>
       value.t === 'PullRequestConnection' ? ({ t: 'PageInfo', value: value.pageInfo } satisfies GqlObject) : null,
   },
-  ChangedFileConnection: {
+  PullRequestChangedFileConnection: {
     nodes: (value) => (value.t === 'ChangedFileConnection' ? value.items : null),
     pageInfo: (value) =>
       value.t === 'ChangedFileConnection' ? ({ t: 'PageInfo', value: value.pageInfo } satisfies GqlObject) : null,
   },
-  ChangedFile: {
+  PullRequestChangedFile: {
     path: (value) => (value.t === 'ChangedFile' ? value.file.filename : null),
   },
   PageInfo: {
@@ -821,7 +821,7 @@ const RESOLVERS: Record<string, Record<string, Resolver>> = {
     hasPreviousPage: (value) => (value.t === 'PageInfo' ? value.value.hasPreviousPage : null),
     startCursor: (value) => (value.t === 'PageInfo' ? value.value.startCursor : null),
   },
-  Type: {
+  __Type: {
     name: (value) => (value.t === 'Type' ? value.name : null),
     kind: (value) => (value.t === 'Type' ? (value.name in TYPE_FIELDS ? 'OBJECT' : 'ENUM') : null),
     fields: (value) =>
@@ -833,10 +833,10 @@ const RESOLVERS: Record<string, Record<string, Resolver>> = {
         ? (TYPE_ENUM_VALUES[value.name] ?? []).map((name) => ({ t: 'EnumValue', name }) as GqlObject)
         : null,
   },
-  Field: {
+  __Field: {
     name: (value) => (value.t === 'Field' ? value.name : null),
   },
-  EnumValue: {
+  __EnumValue: {
     name: (value) => (value.t === 'EnumValue' ? value.name : null),
   },
   CreateIssuePayload: {
@@ -869,7 +869,7 @@ const RESOLVERS: Record<string, Record<string, Resolver>> = {
         ? ({ t: 'CommentEdge', repo: value.repo, comment: value.comment } satisfies GqlObject)
         : null,
   },
-  CommentEdge: {
+  IssueCommentEdge: {
     node: (value) =>
       value.t === 'CommentEdge' ? ({ t: 'IssueComment', repo: value.repo, comment: value.comment } satisfies GqlObject) : null,
   },

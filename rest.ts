@@ -297,7 +297,7 @@ function handleGitRefs(forge: Forge, repo: Repo, method: string, sub: string[], 
         .map(([ref, sha]) => ({ ref, object: { sha, type: 'commit' } }));
       return json(200, refs);
     }
-    const refName = sub.slice(1).join('/');
+    const refName = sub.join('/');
     const found = forge.getRef(repo, refName);
     if (found === null) return error(404, 'Not Found');
     return json(200, { ref: found.ref, object: { sha: found.sha, type: found.type } });

@@ -16,7 +16,7 @@ import {
   ZERO_OID,
   type GitObject,
 } from './git.ts';
-import type { Forge, Repo } from './store.ts';
+import type { Repo } from './store.ts';
 
 /** A malformed git request: the router answers it 400 and keeps serving. */
 export class GitBadRequest extends Error {
@@ -720,5 +720,3 @@ export function handleReceivePack(repo: Repo, body: Buffer): GitResponse {
   return { status: 200, contentType: 'application/x-git-receive-pack-result', body: responseBody };
 }
 
-/** The forge argument, kept for the handlers' future use (quota, logging). Kept explicit. */
-export type ForgeHandle = Forge;
